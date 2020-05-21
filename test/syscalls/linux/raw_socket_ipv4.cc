@@ -357,8 +357,284 @@ TEST_P(RawSocketTest, BindConnectSendAndReceive) {
   EXPECT_EQ(memcmp(recv_buf + sizeof(struct iphdr), kBuf, sizeof(kBuf)), 0);
 }
 
+// Check that setting SO_RCVBUF below min is clamped to the minimum
+// receive buffer size.
+TEST_P(RawSocketTest, SetSocketRecvBufBelowMin) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  // Discover minimum receive buf size by trying to set it to zero.
+  constexpr int kRcvBufSz = 0;
+  ASSERT_THAT(
+      setsockopt(s_, SOL_SOCKET, SO_RCVBUF, &kRcvBufSz, sizeof(kRcvBufSz)),
+      SyscallSucceeds());
+
+  int min = 0;
+  socklen_t min_len = sizeof(min);
+  ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_RCVBUF, &min, &min_len),
+              SyscallSucceeds());
+
+  int below_min = min - 1;
+  ASSERT_THAT(
+      setsockopt(s_, SOL_SOCKET, SO_RCVBUF, &below_min, sizeof(below_min)),
+      SyscallSucceeds());
+
+  int val = 0;
+  socklen_t val_len = sizeof(val);
+  ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_RCVBUF, &val, &val_len),
+              SyscallSucceeds());
+
+  // Linux doubles the value set by SO_SNDBUF/SO_RCVBUF.
+  // TODO(gvisor.dev/issue/2926): Remove when Netstack matches linux behavior.
+  if (!IsRunningOnGvisor()) {
+    min = (min - 1) * 2;
+  }
+
+  ASSERT_EQ(min, val);
+}
+
+// Check that setting SO_RCVBUF above max is clamped to the maximum
+// receive buffer size.
+TEST_P(RawSocketTest, SetSocketRecvBufAboveMax) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  // Discover max buf size by trying to set the largest possible buffer size.
+  constexpr int kRcvBufSz = 0xffffffff;
+  ASSERT_THAT(
+      setsockopt(s_, SOL_SOCKET, SO_RCVBUF, &kRcvBufSz, sizeof(kRcvBufSz)),
+      SyscallSucceeds());
+
+  int max = 0;
+  socklen_t max_len = sizeof(max);
+  ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_RCVBUF, &max, &max_len),
+              SyscallSucceeds());
+
+  int above_max = max + 1;
+  ASSERT_THAT(
+      setsockopt(s_, SOL_SOCKET, SO_RCVBUF, &above_max, sizeof(above_max)),
+      SyscallSucceeds());
+
+  int val = 0;
+  socklen_t val_len = sizeof(val);
+  ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_RCVBUF, &val, &val_len),
+              SyscallSucceeds());
+  ASSERT_EQ(max, val);
+}
+
+// Check that setting SO_RCVBUF min <= kRcvBufSz <= max is honored.
+// receive buffer size.
+TEST_P(RawSocketTest, SetSocketRecvBuf) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  int max = 0;
+  int min = 0;
+  {
+    // Discover max buf size by trying to set a really large buffer size.
+    constexpr int kRcvBufSz = 0xffffffff;
+    ASSERT_THAT(
+        setsockopt(s_, SOL_SOCKET, SO_RCVBUF, &kRcvBufSz, sizeof(kRcvBufSz)),
+        SyscallSucceeds());
+
+    max = 0;
+    socklen_t max_len = sizeof(max);
+    ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_RCVBUF, &max, &max_len),
+                SyscallSucceeds());
+  }
+
+  {
+    // Discover minimum buffer size by trying to set a zero size receive buffer
+    // size.
+    constexpr int kRcvBufSz = 0;
+    ASSERT_THAT(
+        setsockopt(s_, SOL_SOCKET, SO_RCVBUF, &kRcvBufSz, sizeof(kRcvBufSz)),
+        SyscallSucceeds());
+
+    socklen_t min_len = sizeof(min);
+    ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_RCVBUF, &min, &min_len),
+                SyscallSucceeds());
+  }
+
+  int quarter_sz = min + (max - min) / 4;
+  ASSERT_THAT(
+      setsockopt(s_, SOL_SOCKET, SO_RCVBUF, &quarter_sz, sizeof(quarter_sz)),
+      SyscallSucceeds());
+
+  int val = 0;
+  socklen_t val_len = sizeof(val);
+  ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_RCVBUF, &val, &val_len),
+              SyscallSucceeds());
+
+  // Linux doubles the value set by SO_SNDBUF/SO_RCVBUF.
+  // TODO(gvisor.dev/issue/2926): Remove when Netstack matches linux behavior.
+  if (!IsRunningOnGvisor()) {
+    quarter_sz *= 2;
+  }
+  ASSERT_EQ(quarter_sz, val);
+}
+
+// Check that setting SO_SNDBUF below min is clamped to the minimum
+// receive buffer size.
+TEST_P(RawSocketTest, SetSocketSendBufBelowMin) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  // Discover minimum buffer size by trying to set it to zero.
+  constexpr int kSndBufSz = 0;
+  ASSERT_THAT(
+      setsockopt(s_, SOL_SOCKET, SO_SNDBUF, &kSndBufSz, sizeof(kSndBufSz)),
+      SyscallSucceeds());
+
+  int min = 0;
+  socklen_t min_len = sizeof(min);
+  ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_SNDBUF, &min, &min_len),
+              SyscallSucceeds());
+
+  int below_min = min - 1;
+  ASSERT_THAT(
+      setsockopt(s_, SOL_SOCKET, SO_SNDBUF, &below_min, sizeof(below_min)),
+      SyscallSucceeds());
+
+  int val = 0;
+  socklen_t val_len = sizeof(val);
+  ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_SNDBUF, &val, &val_len),
+              SyscallSucceeds());
+
+  // Linux doubles the value set by SO_SNDBUF/SO_RCVBUF.
+  // TODO(gvisor.dev/issue/2926): Remove when Netstack matches linux behavior.
+  if (!IsRunningOnGvisor()) {
+    min = (min - 1) * 2;
+  }
+  ASSERT_EQ(min, val);
+}
+
+// Check that setting SO_SNDBUF above max is clamped to the maximum
+// receive buffer size.
+TEST_P(RawSocketTest, SetSocketSendBufAboveMax) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  // Discover maximum buffer size by trying to set it to a large value.
+  constexpr int kSndBufSz = 0xffffffff;
+  ASSERT_THAT(
+      setsockopt(s_, SOL_SOCKET, SO_SNDBUF, &kSndBufSz, sizeof(kSndBufSz)),
+      SyscallSucceeds());
+
+  int max = 0;
+  socklen_t max_len = sizeof(max);
+  ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_SNDBUF, &max, &max_len),
+              SyscallSucceeds());
+
+  int above_max = max + 1;
+  ASSERT_THAT(
+      setsockopt(s_, SOL_SOCKET, SO_SNDBUF, &above_max, sizeof(above_max)),
+      SyscallSucceeds());
+
+  int val = 0;
+  socklen_t val_len = sizeof(val);
+  ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_SNDBUF, &val, &val_len),
+              SyscallSucceeds());
+  ASSERT_EQ(max, val);
+}
+
+// Check that setting SO_SNDBUF min <= kRcvBufSz <= max is honored.
+// receive buffer size.
+TEST_P(RawSocketTest, SetSocketSendBuf) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  int max = 0;
+  int min = 0;
+  {
+    // Discover maximum buffer size by trying to set it to a large value.
+    constexpr int kRcvBufSz = 0xffffffff;
+    ASSERT_THAT(
+        setsockopt(s_, SOL_SOCKET, SO_SNDBUF, &kRcvBufSz, sizeof(kRcvBufSz)),
+        SyscallSucceeds());
+
+    max = 0;
+    socklen_t max_len = sizeof(max);
+    ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_SNDBUF, &max, &max_len),
+                SyscallSucceeds());
+  }
+
+  {
+    // Discover minimum buffer size by trying to set it to zero.
+    constexpr int kRcvBufSz = 0;
+    ASSERT_THAT(
+        setsockopt(s_, SOL_SOCKET, SO_SNDBUF, &kRcvBufSz, sizeof(kRcvBufSz)),
+        SyscallSucceeds());
+
+    socklen_t min_len = sizeof(min);
+    ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_SNDBUF, &min, &min_len),
+                SyscallSucceeds());
+  }
+
+  int quarter_sz = min + (max - min) / 4;
+  ASSERT_THAT(
+      setsockopt(s_, SOL_SOCKET, SO_SNDBUF, &quarter_sz, sizeof(quarter_sz)),
+      SyscallSucceeds());
+
+  int val = 0;
+  socklen_t val_len = sizeof(val);
+  ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_SNDBUF, &val, &val_len),
+              SyscallSucceeds());
+
+  // Linux doubles the value set by SO_SNDBUF/SO_RCVBUF.
+  // TODO(gvisor.dev/issue/2926): Remove when Netstack matches linux behavior.
+  if (!IsRunningOnGvisor()) {
+    quarter_sz *= 2;
+  }
+
+  ASSERT_EQ(quarter_sz, val);
+}
+
 void RawSocketTest::SendBuf(const char* buf, int buf_len) {
   ASSERT_NO_FATAL_FAILURE(SendBufTo(s_, addr_, buf, buf_len));
+}
+
+// Test that receive buffer limits are enforced.
+TEST_P(RawSocketTest, RecvBufLimits) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  ASSERT_THAT(
+      bind(s_, reinterpret_cast<struct sockaddr*>(&addr_), sizeof(addr_)),
+      SyscallSucceeds());
+  ASSERT_THAT(
+      connect(s_, reinterpret_cast<struct sockaddr*>(&addr_), sizeof(addr_)),
+      SyscallSucceeds());
+
+  int min = 0;
+  {
+    // Discover minimum buffer size by trying to set it to zero.
+    constexpr int kRcvBufSz = 0;
+    ASSERT_THAT(
+        setsockopt(s_, SOL_SOCKET, SO_RCVBUF, &kRcvBufSz, sizeof(kRcvBufSz)),
+        SyscallSucceeds());
+
+    socklen_t min_len = sizeof(min);
+    ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_RCVBUF, &min, &min_len),
+                SyscallSucceeds());
+  }
+
+  std::vector<char> buf(min);
+  ASSERT_NO_FATAL_FAILURE(SendBuf(buf.data(), buf.size()));
+  ASSERT_NO_FATAL_FAILURE(SendBuf(buf.data(), buf.size()));
+
+  // Receive the packet and make sure it's identical.
+  std::vector<char> recv_buf(buf.size() + sizeof(struct iphdr));
+  ASSERT_NO_FATAL_FAILURE(ReceiveBuf(recv_buf.data(), sizeof(recv_buf)));
+  EXPECT_EQ(
+      memcmp(recv_buf.data() + sizeof(struct iphdr), buf.data(), buf.size()),
+      0);
+
+  // Assert that the second message is dropped as the buffer should be full.
+  struct iovec iov = {};
+  iov.iov_base = static_cast<void*>(const_cast<char*>(recv_buf.data()));
+  iov.iov_len = buf.size();
+  struct msghdr msg = {};
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = NULL;
+  msg.msg_controllen = 0;
+  msg.msg_flags = 0;
+  ASSERT_THAT(RetryEINTR(recvmsg)(s_, &msg, MSG_DONTWAIT),
+              SyscallFailsWithErrno(EAGAIN));
 }
 
 void RawSocketTest::SendBufTo(int sock, const struct sockaddr_in& addr,

@@ -1543,5 +1543,44 @@ TEST_P(UdpSocketTest, SendAndReceiveTOS) {
   memcpy(&received_tos, CMSG_DATA(cmsg), sizeof(received_tos));
   EXPECT_EQ(received_tos, sent_tos);
 }
+
+// Test that receive buffer limits are enforced.
+TEST_P(UdpSocketTest, RecvBufLimits) {
+  // Discover minimum buffer size by setting it to zero.
+  constexpr int kSndBufSz = 0;
+  ASSERT_THAT(
+      setsockopt(s_, SOL_SOCKET, SO_RCVBUF, &kSndBufSz, sizeof(kSndBufSz)),
+      SyscallSucceeds());
+
+  int min = 0;
+  socklen_t min_len = sizeof(min);
+  ASSERT_THAT(getsockopt(s_, SOL_SOCKET, SO_RCVBUF, &min, &min_len),
+              SyscallSucceeds());
+
+  // Bind s_ to loopback.
+  ASSERT_THAT(bind(s_, addr_[0], addrlen_), SyscallSucceeds());
+
+  // Send some data to s_.
+  std::vector<char> buf(min);
+  RandomizeBuffer(buf.data(), buf.size());
+
+  // Send two datagrams of size min, the second one should be dropped
+  // as the first one should fill up the receive buffer.
+  ASSERT_THAT(sendto(t_, buf.data(), buf.size(), 0, addr_[0], addrlen_),
+              SyscallSucceedsWithValue(buf.size()));
+  ASSERT_THAT(sendto(t_, buf.data(), buf.size(), 0, addr_[0], addrlen_),
+              SyscallSucceedsWithValue(buf.size()));
+
+  // Receive the data.
+  std::vector<char> received(buf.size());
+  EXPECT_THAT(recv(s_, received.data(), received.size(), 0),
+              SyscallSucceedsWithValue(received.size()));
+  EXPECT_EQ(memcmp(buf.data(), received.data(), buf.size()), 0);
+
+  // 2nd Receive should fail with EAGAIN.
+  EXPECT_THAT(recv(s_, received.data(), received.size(), MSG_DONTWAIT),
+              SyscallFailsWithErrno(EAGAIN));
+}
+
 }  // namespace testing
 }  // namespace gvisor

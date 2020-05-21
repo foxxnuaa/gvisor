@@ -3981,8 +3981,11 @@ func TestDefaultBufferSizes(t *testing.T) {
 	checkRecvBufferSize(t, ep, tcp.DefaultReceiveBufferSize)
 
 	// Change the default send buffer size.
-	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, tcp.SendBufferSizeOption{1, tcp.DefaultSendBufferSize * 2, tcp.DefaultSendBufferSize * 20}); err != nil {
-		t.Fatalf("SetTransportProtocolOption failed: %v", err)
+	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, tcpip.StackSendBufferSizeOption{
+		Min:     1,
+		Default: tcp.DefaultSendBufferSize * 2,
+		Max:     tcp.DefaultSendBufferSize * 20}); err != nil {
+		t.Fatalf("SetTransportProtocolOption failed: %s", err)
 	}
 
 	ep.Close()
@@ -3995,7 +3998,10 @@ func TestDefaultBufferSizes(t *testing.T) {
 	checkRecvBufferSize(t, ep, tcp.DefaultReceiveBufferSize)
 
 	// Change the default receive buffer size.
-	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, tcp.ReceiveBufferSizeOption{1, tcp.DefaultReceiveBufferSize * 3, tcp.DefaultReceiveBufferSize * 30}); err != nil {
+	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, tcpip.StackReceiveBufferSizeOption{
+		Min:     1,
+		Default: tcp.DefaultReceiveBufferSize * 3,
+		Max:     tcp.DefaultReceiveBufferSize * 30}); err != nil {
 		t.Fatalf("SetTransportProtocolOption failed: %v", err)
 	}
 
@@ -4023,12 +4029,12 @@ func TestMinMaxBufferSizes(t *testing.T) {
 	defer ep.Close()
 
 	// Change the min/max values for send/receive
-	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, tcp.ReceiveBufferSizeOption{200, tcp.DefaultReceiveBufferSize * 2, tcp.DefaultReceiveBufferSize * 20}); err != nil {
-		t.Fatalf("SetTransportProtocolOption failed: %v", err)
+	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, tcpip.StackReceiveBufferSizeOption{Min: 200, Default: tcp.DefaultReceiveBufferSize * 2, Max: tcp.DefaultReceiveBufferSize * 20}); err != nil {
+		t.Fatalf("SetTransportProtocolOption failed: %s", err)
 	}
 
-	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, tcp.SendBufferSizeOption{300, tcp.DefaultSendBufferSize * 3, tcp.DefaultSendBufferSize * 30}); err != nil {
-		t.Fatalf("SetTransportProtocolOption failed: %v", err)
+	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, tcpip.StackSendBufferSizeOption{Min: 300, Default: tcp.DefaultSendBufferSize * 3, Max: tcp.DefaultSendBufferSize * 30}); err != nil {
+		t.Fatalf("SetTransportProtocolOption failed: %s", err)
 	}
 
 	// Set values below the min.
@@ -5663,8 +5669,8 @@ func TestReceiveBufferAutoTuningApplicationLimited(t *testing.T) {
 	// the segment queue holding unprocessed packets is limited to 500.
 	const receiveBufferSize = 80 << 10 // 80KB.
 	const maxReceiveBufferSize = receiveBufferSize * 10
-	if err := stk.SetTransportProtocolOption(tcp.ProtocolNumber, tcp.ReceiveBufferSizeOption{1, receiveBufferSize, maxReceiveBufferSize}); err != nil {
-		t.Fatalf("SetTransportProtocolOption failed: %v", err)
+	if err := stk.SetTransportProtocolOption(tcp.ProtocolNumber, tcpip.StackReceiveBufferSizeOption{Min: 1, Default: receiveBufferSize, Max: maxReceiveBufferSize}); err != nil {
+		t.Fatalf("SetTransportProtocolOption failed: %s", err)
 	}
 
 	// Enable auto-tuning.
@@ -5784,8 +5790,8 @@ func TestReceiveBufferAutoTuning(t *testing.T) {
 	// the segment queue holding unprocessed packets is limited to 300.
 	const receiveBufferSize = 80 << 10 // 80KB.
 	const maxReceiveBufferSize = receiveBufferSize * 10
-	if err := stk.SetTransportProtocolOption(tcp.ProtocolNumber, tcp.ReceiveBufferSizeOption{1, receiveBufferSize, maxReceiveBufferSize}); err != nil {
-		t.Fatalf("SetTransportProtocolOption failed: %v", err)
+	if err := stk.SetTransportProtocolOption(tcp.ProtocolNumber, tcpip.StackReceiveBufferSizeOption{Min: 1, Default: receiveBufferSize, Max: maxReceiveBufferSize}); err != nil {
+		t.Fatalf("SetTransportProtocolOption failed: %s", err)
 	}
 
 	// Enable auto-tuning.
@@ -5926,7 +5932,7 @@ func TestDelayEnabled(t *testing.T) {
 	checkDelayOption(t, c, false, false) // Delay is disabled by default.
 
 	for _, v := range []struct {
-		delayEnabled    tcp.DelayEnabled
+		delayEnabled    tcpip.StackDelayEnabled
 		wantDelayOption bool
 	}{
 		{delayEnabled: false, wantDelayOption: false},
@@ -5941,10 +5947,10 @@ func TestDelayEnabled(t *testing.T) {
 	}
 }
 
-func checkDelayOption(t *testing.T, c *context.Context, wantDelayEnabled tcp.DelayEnabled, wantDelayOption bool) {
+func checkDelayOption(t *testing.T, c *context.Context, wantDelayEnabled tcpip.StackDelayEnabled, wantDelayOption bool) {
 	t.Helper()
 
-	var gotDelayEnabled tcp.DelayEnabled
+	var gotDelayEnabled tcpip.StackDelayEnabled
 	if err := c.Stack().TransportProtocolOption(tcp.ProtocolNumber, &gotDelayEnabled); err != nil {
 		t.Fatalf("TransportProtocolOption(tcp, &gotDelayEnabled) failed: %v", err)
 	}
