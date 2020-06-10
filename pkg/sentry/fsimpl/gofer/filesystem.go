@@ -213,9 +213,8 @@ func (fs *filesystem) revalidateChildLocked(ctx context.Context, vfsObj *vfs.Vir
 		return nil, err
 	}
 	if child != nil {
-		if !file.isNil() && qid.Path == child.ino {
-			// The file at this path hasn't changed. Just update cached
-			// metadata.
+		if !file.isNil() && inoFromPath(qid.Path) == child.ino {
+			// The file at this path hasn't changed. Just update cached metadata.
 			file.close(ctx)
 			child.updateFromP9Attrs(attrMask, &attr)
 			return child, nil
