@@ -130,6 +130,15 @@ const (
 	outgoing
 )
 
+// headerError is a type of error that UDP packet may have.
+type headerError int
+
+const (
+	valid headerError = iota
+	badPacketLength
+	badChecksum
+)
+
 // header4Tuple returns the header4Tuple for the given flow and direction. Note
 // that the tuple contains no mapped addresses as those only exist at the socket
 // level but not at the packet header level.
@@ -391,17 +400,16 @@ func (c *testContext) injectPacket(flow testFlow, payload []byte) {
 
 	h := flow.header4Tuple(incoming)
 	if flow.isV4() {
-		c.injectV4Packet(payload, &h, true /* valid */)
+		c.injectV4Packet(payload, &h, valid)
 	} else {
-		c.injectV6Packet(payload, &h, true /* valid */)
+		c.injectV6Packet(payload, &h, valid)
 	}
 }
 
 // injectV6Packet creates a V6 test packet with the given payload and header
-// values, and injects it into the link endpoint. valid indicates if the
-// caller intends to inject a packet with a valid or an invalid UDP header.
-// We can invalidate the header by corrupting the UDP payload length.
-func (c *testContext) injectV6Packet(payload []byte, h *header4Tuple, valid bool) {
+// values, and injects it into the link endpoint. hdrerror indicates if the
+// caller intends to inject a packet with an UDP header error.
+func (c *testContext) injectV6Packet(payload []byte, h *header4Tuple, hdrerror headerError) {
 	// Allocate a buffer for data and headers.
 	buf := buffer.NewView(header.UDPMinimumSize + header.IPv6MinimumSize + len(payload))
 	payloadStart := len(buf) - len(payload)
@@ -421,9 +429,8 @@ func (c *testContext) injectV6Packet(payload []byte, h *header4Tuple, valid bool
 	// Initialize the UDP header.
 	u := header.UDP(buf[header.IPv6MinimumSize:])
 	l := uint16(header.UDPMinimumSize + len(payload))
-	if !valid {
-		// Change the UDP payload length to corrupt the header
-		// as requested by the caller.
+	if hdrerror == badPacketLength {
+		// Make the UDP payload length bad as requested.
 		l++
 	}
 	u.Encode(&header.UDPFields{
@@ -437,6 +444,10 @@ func (c *testContext) injectV6Packet(payload []byte, h *header4Tuple, valid bool
 
 	// Calculate the UDP checksum and set it.
 	xsum = header.Checksum(payload, xsum)
+	if hdrerror == badChecksum {
+		// Make the UDP checksum bad as requested.
+		xsum++
+	}
 	u.SetChecksum(^u.CalculateChecksum(xsum))
 
 	// Inject packet.
@@ -446,10 +457,9 @@ func (c *testContext) injectV6Packet(payload []byte, h *header4Tuple, valid bool
 }
 
 // injectV4Packet creates a V4 test packet with the given payload and header
-// values, and injects it into the link endpoint. valid indicates if the
-// caller intends to inject a packet with a valid or an invalid UDP header.
-// We can invalidate the header by corrupting the UDP payload length.
-func (c *testContext) injectV4Packet(payload []byte, h *header4Tuple, valid bool) {
+// values, and injects it into the link endpoint. hdrerror indicates if the
+// caller intends to inject a packet with an UDP header error.
+func (c *testContext) injectV4Packet(payload []byte, h *header4Tuple, hdrerror headerError) {
 	// Allocate a buffer for data and headers.
 	buf := buffer.NewView(header.UDPMinimumSize + header.IPv4MinimumSize + len(payload))
 	payloadStart := len(buf) - len(payload)
@@ -470,10 +480,15 @@ func (c *testContext) injectV4Packet(payload []byte, h *header4Tuple, valid bool
 
 	// Initialize the UDP header.
 	u := header.UDP(buf[header.IPv4MinimumSize:])
+	l := uint16(header.UDPMinimumSize + len(payload))
+	if hdrerror == badPacketLength {
+		// Make the UDP payload length bad as requested.
+		l++
+	}
 	u.Encode(&header.UDPFields{
 		SrcPort: h.srcAddr.Port,
 		DstPort: h.dstAddr.Port,
-		Length:  uint16(header.UDPMinimumSize + len(payload)),
+		Length:  l,
 	})
 
 	// Calculate the UDP pseudo-header checksum.
@@ -481,10 +496,13 @@ func (c *testContext) injectV4Packet(payload []byte, h *header4Tuple, valid bool
 
 	// Calculate the UDP checksum and set it.
 	xsum = header.Checksum(payload, xsum)
+	if hdrerror == badChecksum {
+		// Make the UDP checksum bad as requested.
+		xsum++
+	}
 	u.SetChecksum(^u.CalculateChecksum(xsum))
 
 	// Inject packet.
-
 	c.linkEP.InjectInbound(ipv4.ProtocolNumber, &stack.PacketBuffer{
 		Data: buf.ToVectorisedView(),
 	})
@@ -796,7 +814,7 @@ func TestV4ReadSelfSource(t *testing.T) {
 			h := unicastV4.header4Tuple(incoming)
 			h.srcAddr = h.dstAddr
 
-			c.injectV4Packet(payload, &h, true /* valid */)
+			c.injectV4Packet(payload, &h, valid)
 
 			if got := c.s.Stats().IP.InvalidSourceAddressesReceived.Value(); got != tt.wantInvalidSource {
 				t.Errorf("c.s.Stats().IP.InvalidSourceAddressesReceived got %d, want %d", got, tt.wantInvalidSource)
@@ -1705,7 +1723,7 @@ func TestIncrementMalformedPacketsReceived(t *testing.T) {
 	payload := newPayload()
 	c.t.Helper()
 	h := unicastV6.header4Tuple(incoming)
-	c.injectV6Packet(payload, &h, false /* !valid */)
+	c.injectV6Packet(payload, &h, badPacketLength)
 
 	var want uint64 = 1
 	if got := c.s.Stats().UDP.MalformedPacketsReceived.Value(); got != want {
@@ -1765,6 +1783,32 @@ func TestShortHeader(t *testing.T) {
 
 	if got, want := c.s.Stats().MalformedRcvdPackets.Value(), uint64(1); got != want {
 		t.Errorf("got c.s.Stats().MalformedRcvdPackets.Value() = %d, want = %d", got, want)
+	}
+}
+
+// TestIncrementChecksumErrors verifies if a checsum error is detected,
+// global and endpoint stats get incremented.
+func TestIncrementChecksumErrors(t *testing.T) {
+	c := newDualTestContext(t, defaultMTU)
+	defer c.cleanup()
+
+	c.createEndpoint(ipv6.ProtocolNumber)
+	// Bind to wildcard.
+	if err := c.ep.Bind(tcpip.FullAddress{Port: stackPort}); err != nil {
+		c.t.Fatalf("Bind failed: %v", err)
+	}
+
+	payload := newPayload()
+	c.t.Helper()
+	h := unicastV6.header4Tuple(incoming)
+	c.injectV6Packet(payload, &h, badChecksum)
+
+	var want uint64 = 1
+	if got := c.s.Stats().UDP.ChecksumErrors.Value(); got != want {
+		t.Errorf("got stats.UDP.ChecksumErrors.Value() = %v, want = %v", got, want)
+	}
+	if got := c.ep.Stats().(*tcpip.TransportEndpointStats).ReceiveErrors.ChecksumErrors.Value(); got != want {
+		t.Errorf("got EP Stats.ReceiveErrors.ChecksumErrors stats = %v, want = %v", got, want)
 	}
 }
 

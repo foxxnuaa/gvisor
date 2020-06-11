@@ -1289,6 +1289,24 @@ func (e *endpoint) HandlePacket(r *stack.Route, id stack.TransportEndpointID, pk
 		return
 	}
 
+	verifyChecksum := true
+	if r.Capabilities()&stack.CapabilityRXChecksumOffload != 0 ||
+		(r.NetProto == header.IPv4ProtocolNumber && hdr.Checksum() == 0) {
+		verifyChecksum = false
+	}
+	if verifyChecksum {
+		xsum := r.PseudoHeaderChecksum(ProtocolNumber, hdr.Length())
+		for _, v := range pkt.Data.Views() {
+			xsum = header.Checksum(v, xsum)
+		}
+		if hdr.CalculateChecksum(xsum) != 0xffff {
+			// Checksum Error.
+			e.stack.Stats().UDP.ChecksumErrors.Increment()
+			e.stats.ReceiveErrors.ChecksumErrors.Increment()
+			return
+		}
+	}
+
 	e.rcvMu.Lock()
 	e.stack.Stats().UDP.PacketsReceived.Increment()
 	e.stats.PacketsReceived.Increment()
