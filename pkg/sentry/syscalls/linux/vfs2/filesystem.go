@@ -18,6 +18,8 @@ import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
+	"gvisor.dev/gvisor/pkg/sentry/kernel/pipe"
+	"gvisor.dev/gvisor/pkg/sentry/limits"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/usermem"
@@ -237,6 +239,76 @@ func renameat(t *kernel.Task, olddirfd int32, oldpathAddr usermem.Addr, newdirfd
 	return t.Kernel().VFS().RenameAt(t, t.Credentials(), &oldtpop.pop, &newtpop.pop, &vfs.RenameOptions{
 		Flags: flags,
 	})
+}
+
+// Fallocate implements linux system call fallocate(2).
+func Fallocate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+	fd := args[0].Int()
+	mode := args[1].Int64()
+	offset := args[2].Int64()
+	length := args[3].Int64()
+
+	file := t.GetFileVFS2(fd)
+
+	if file == nil {
+		return 0, nil, syserror.EBADF
+	}
+	defer file.DecRef()
+
+	stat, err := file.Stat(t.AsyncContext(), vfs.StatOptions{})
+	if offset < 0 || length <= 0 || err != nil {
+		return 0, nil, syserror.EINVAL
+	}
+
+	if mode != 0 {
+		t.Kernel().EmitUnimplementedEvent(t)
+		return 0, nil, syserror.ENOTSUP
+	}
+
+	if !file.IsWritable() {
+		return 0, nil, syserror.EBADF
+	}
+	if _, ok := file.Impl().(*pipe.VFSPipeFD); ok {
+		return 0, nil, syserror.ESPIPE
+	}
+
+	if stat.Mode&linux.S_IFDIR != 0 {
+		return 0, nil, syserror.EISDIR
+	}
+	if stat.Mode&linux.S_IFREG == 0 {
+		return 0, nil, syserror.ENODEV
+	}
+
+	size := offset + length
+
+	if size < 0 {
+		return 0, nil, syserror.EFBIG
+	}
+
+	if uint64(size) >= t.ThreadGroup().Limits().Get(limits.FileSize).Cur {
+		t.SendSignal(&arch.SignalInfo{
+			Signo: int32(linux.SIGXFSZ),
+			Code:  arch.SignalInfoUser,
+		})
+		return 0, nil, syserror.EFBIG
+	}
+
+	opts := vfs.SetStatOptions{
+		Stat: linux.Statx{
+			Mask: linux.STATX_SIZE,
+			Size: uint64(size),
+		},
+	}
+
+	if err := file.SetStat(t.AsyncContext(), opts); err != nil {
+		return 0, nil, err
+	}
+
+	// File length modified, generate notification.
+	// TODO(gvisor.dev/issue/1479): Reenable when Inotify is ported.
+	// file.Dirent.InotifyEvent(linux.IN_MODIFY, 0)
+
+	return 0, nil, nil
 }
 
 // Rmdir implements Linux syscall rmdir(2).
