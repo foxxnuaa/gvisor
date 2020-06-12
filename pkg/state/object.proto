@@ -16,11 +16,28 @@ syntax = "proto3";
 
 package gvisor.state.statefile;
 
+// Dot is a reference resolution.
+message Dot {
+  oneof value {
+    uint32 index = 1;
+    string field = 2;
+  }
+}
+
+// Ref is a reference to an object.
+message Ref {
+  uint64 value = 1;
+  repeated Dot dot = 2;
+}
+
+// Nil is a nil pointer.
+message Nil {}
+
 // Slice is a slice value.
 message Slice {
   uint32 length = 1;
   uint32 capacity = 2;
-  uint64 ref_value = 3;
+  Ref ref_value = 3;
 }
 
 // Array is an array value.
@@ -109,8 +126,6 @@ message Float32s {
 }
 
 // Object are primitive encodings.
-//
-// Note that ref_value references an Object.id, below.
 message Object {
   oneof value {
     bool bool_value = 1;
@@ -118,7 +133,7 @@ message Object {
     int64 int64_value = 3;
     uint64 uint64_value = 4;
     double double_value = 5;
-    uint64 ref_value = 6;
+    Ref ref_value = 6;
     Slice slice_value = 7;
     Array array_value = 8;
     Interface interface_value = 9;
@@ -136,5 +151,6 @@ message Object {
     Bools bool_array_value = 21;
     Float64s float64_array_value = 22;
     Float32s float32_array_value = 23;
+    Nil nil_value = 24;
   }
 }

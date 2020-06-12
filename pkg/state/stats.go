@@ -51,19 +51,17 @@ func (s *Stats) sample(typ reflect.Type) {
 	s.last = now
 }
 
-// Add adds a sample count.
-func (s *Stats) Add(obj reflect.Value) {
-	if s == nil {
-		return
-	}
+// add adds a sample count.
+//
+// Precondition: s must not be nil.
+func (s *Stats) add(t reflect.Type) {
 	if s.byType == nil {
 		s.byType = make(map[reflect.Type]*statEntry)
 	}
-	typ := obj.Type()
-	entry, ok := s.byType[typ]
+	entry, ok := s.byType[t]
 	if !ok {
 		entry = new(statEntry)
-		s.byType[typ] = entry
+		s.byType[t] = entry
 	}
 	entry.count++
 }
@@ -84,6 +82,8 @@ func (s *Stats) Start(obj reflect.Value) {
 	if s == nil {
 		return
 	}
+	t := obj.Type()
+	s.add(t)
 	if len(s.stack) > 0 {
 		last := s.stack[len(s.stack)-1]
 		s.sample(last)
@@ -91,7 +91,7 @@ func (s *Stats) Start(obj reflect.Value) {
 		// First time sample.
 		s.last = time.Now()
 	}
-	s.stack = append(s.stack, obj.Type())
+	s.stack = append(s.stack, t)
 }
 
 // Done finishes the current sample.

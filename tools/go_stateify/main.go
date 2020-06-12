@@ -203,7 +203,7 @@ func main() {
 
 	// Declare our emission closures.
 	emitRegister := func(name string) {
-		initCalls = append(initCalls, fmt.Sprintf("%sRegister(\"%s.%s\", (*%s)(nil), state.Fns{Save: (*%s).save, Load: (*%s).load})", statePrefix, *fullPkg, name, name, name, name))
+		initCalls = append(initCalls, fmt.Sprintf("%sRegister(\"%s.%s\", (*%s)(nil))", statePrefix, *fullPkg, name, name))
 	}
 	emitZeroCheck := func(name string) {
 		fmt.Fprintf(outputFile, "	if !%sIsZeroValue(&x.%s) { m.Failf(\"%s is %%#v, expected zero\", &x.%s) }\n", statePrefix, name, name, name)
@@ -367,7 +367,7 @@ func main() {
 					}
 
 					// Generate the save method.
-					fmt.Fprintf(outputFile, "func (x *%s) save(m %sMap) {\n", ts.Name.Name, statePrefix)
+					fmt.Fprintf(outputFile, "func (x *%s) StateSave(m %sMap) {\n", ts.Name.Name, statePrefix)
 					fmt.Fprintf(outputFile, "	x.beforeSave()\n")
 					scanFields(ss, scanFunctions{zerovalue: emitZeroCheck})
 					scanFields(ss, scanFunctions{value: emitSaveValue})
@@ -385,7 +385,7 @@ func main() {
 					//
 					// Note that the manual loads always follow the
 					// automated loads.
-					fmt.Fprintf(outputFile, "func (x *%s) load(m %sMap) {\n", ts.Name.Name, statePrefix)
+					fmt.Fprintf(outputFile, "func (x *%s) StateLoad(m %sMap) {\n", ts.Name.Name, statePrefix)
 					scanFields(ss, scanFunctions{normal: emitLoad, wait: emitLoadWait})
 					scanFields(ss, scanFunctions{value: emitLoadValue})
 					if hasAfterLoad {
@@ -405,10 +405,10 @@ func main() {
 					_, val := resolveTypeName(ts.Name.Name, ts.Type)
 
 					// Dispatch directly.
-					fmt.Fprintf(outputFile, "func (x *%s) save(m %sMap) {\n", ts.Name.Name, statePrefix)
+					fmt.Fprintf(outputFile, "func (x *%s) StateSave(m %sMap) {\n", ts.Name.Name, statePrefix)
 					fmt.Fprintf(outputFile, "	m.SaveValue(\"\", (%s)(*x))\n", val)
 					fmt.Fprintf(outputFile, "}\n\n")
-					fmt.Fprintf(outputFile, "func (x *%s) load(m %sMap) {\n", ts.Name.Name, statePrefix)
+					fmt.Fprintf(outputFile, "func (x *%s) StateLoad(m %sMap) {\n", ts.Name.Name, statePrefix)
 					fmt.Fprintf(outputFile, "	m.LoadValue(\"\", new(%s), func(y interface{}) { *x = (%s)(y.(%s)) })\n", val, ts.Name.Name, val)
 					fmt.Fprintf(outputFile, "}\n\n")
 

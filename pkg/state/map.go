@@ -95,7 +95,7 @@ type Map struct {
 // 	m.Load("B", &x.B)
 // }
 func (m Map) Save(name string, objPtr interface{}) {
-	m.save(name, reflect.ValueOf(objPtr).Elem(), ".%s")
+	m.save(name, reflect.ValueOf(objPtr).Elem())
 }
 
 // SaveValue adds the given object value to the map.
@@ -119,15 +119,11 @@ func (m Map) Save(name string, objPtr interface{}) {
 //	})
 // }
 func (m Map) SaveValue(name string, obj interface{}) {
-	m.save(name, reflect.ValueOf(obj), ".(value %s)")
+	m.save(name, reflect.ValueOf(obj))
 }
 
-// save is helper for the above. It takes the name of value to save the field
-// to, the field object (obj), and a format string that specifies how the
-// field's saving logic is dispatched from the struct (normal, value, etc.). The
-// format string should expect one string parameter, which is the name of the
-// field.
-func (m Map) save(name string, obj reflect.Value, format string) {
+// save is helper for the above.
+func (m Map) save(name string, obj reflect.Value) {
 	if m.es == nil {
 		// Not currently encoding.
 		m.Failf("no encode state for %q", name)
@@ -139,7 +135,7 @@ func (m Map) save(name string, obj reflect.Value, format string) {
 	// sorted and checked for duplicates (see encodeStruct).
 	m.data = append(m.data, entry{
 		name:   name,
-		object: m.es.encodeObject(obj, false, format, name),
+		object: m.es.encodeObject(obj, false),
 	})
 }
 
@@ -147,7 +143,7 @@ func (m Map) save(name string, obj reflect.Value, format string) {
 //
 // See Save for an example.
 func (m Map) Load(name string, objPtr interface{}) {
-	m.load(name, reflect.ValueOf(objPtr), false, nil, ".%s")
+	m.load(name, reflect.ValueOf(objPtr), false, nil)
 }
 
 // LoadWait loads the given objects from the map, and marks it as requiring all
@@ -155,7 +151,7 @@ func (m Map) Load(name string, objPtr interface{}) {
 //
 // See Save for an example.
 func (m Map) LoadWait(name string, objPtr interface{}) {
-	m.load(name, reflect.ValueOf(objPtr), true, nil, ".(wait %s)")
+	m.load(name, reflect.ValueOf(objPtr), true, nil)
 }
 
 // LoadValue loads the given object value from the map.
@@ -163,16 +159,14 @@ func (m Map) LoadWait(name string, objPtr interface{}) {
 // See SaveValue for an example.
 func (m Map) LoadValue(name string, objPtr interface{}, fn func(interface{})) {
 	o := reflect.ValueOf(objPtr)
-	m.load(name, o, true, func() { fn(o.Elem().Interface()) }, ".(value %s)")
+	m.load(name, o, true, func() { fn(o.Elem().Interface()) })
 }
 
 // load is helper for the above. It takes the name of value to load the field
 // from, the target field pointer (objPtr), whether load completion of the
-// struct depends on the field's load completion (wait), the load completion
-// logic (fn), and a format string that specifies how the field's loading logic
-// is dispatched from the struct (normal, wait, value, etc.). The format string
-// should expect one string parameter, which is the name of the field.
-func (m Map) load(name string, objPtr reflect.Value, wait bool, fn func(), format string) {
+// struct depends on the field's load completion (wait), and the load
+// completion logic (fn).
+func (m Map) load(name string, objPtr reflect.Value, wait bool, fn func()) {
 	if m.ds == nil {
 		// Not currently decoding.
 		m.Failf("no decode state for %q", name)
@@ -188,11 +182,11 @@ func (m Map) load(name string, objPtr reflect.Value, wait bool, fn func(), forma
 	})
 	if i >= len(m.data) || m.data[i].name != name {
 		// There is no data for this name?
-		m.Failf("no data found for %q", name)
+		m.Failf("no data found for %q, data is: %#v", name, m.data)
 	}
 
 	// Perform the decode.
-	m.ds.decodeObject(m.os, objPtr.Elem(), m.data[i].object, format, name)
+	m.ds.decodeObject(m.os, objPtr.Elem(), m.data[i].object)
 	if wait {
 		// Mark this individual object a blocker.
 		m.ds.waitObject(m.os, m.data[i].object, fn)

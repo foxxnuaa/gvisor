@@ -38,7 +38,7 @@ type objectState struct {
 	//
 	// If this field is zero, then this is an anonymous (unregistered,
 	// non-reference primitive) object. This is immutable.
-	id uint64
+	id objectID
 
 	// obj is the object. This may or may not be valid yet, depending on
 	// whether complete returns true. However, regardless of whether the
@@ -62,9 +62,6 @@ type objectState struct {
 
 	// callbacks is a set of callbacks to execute on load.
 	callbacks []func()
-
-	// path is the decoding path to the object.
-	path recoverable
 }
 
 // complete indicates the object is complete.
@@ -79,7 +76,6 @@ func (os *objectState) checkComplete(stats *Stats) {
 	if os.blockedBy > 0 {
 		return
 	}
-	stats.Start(os.obj)
 
 	// Fire all callbacks.
 	for _, fn := range os.callbacks {
@@ -93,7 +89,6 @@ func (os *objectState) checkComplete(stats *Stats) {
 		other.checkComplete(stats)
 	}
 	os.blocking = nil
-	stats.Done()
 }
 
 // waitFor queues a dependency on the given object.
@@ -138,11 +133,11 @@ type decodeState struct {
 	ctx context.Context
 
 	// objectByID is the set of objects in progress.
-	objectsByID map[uint64]*objectState
+	objectsByID map[objectID]*objectState
 
 	// deferred are objects that have been read, by no interest has been
 	// registered yet. These will be decoded once interest in registered.
-	deferred map[uint64]*pb.Object
+	deferred map[objectID]*pb.Object
 
 	// outstanding is the number of outstanding objects.
 	outstanding uint32
@@ -152,14 +147,11 @@ type decodeState struct {
 
 	// stats is the passed stats object.
 	stats *Stats
-
-	// recoverable is the panic recover facility.
-	recoverable
 }
 
 // lookup looks up an object in decodeState or returns nil if no such object
 // has been previously registered.
-func (ds *decodeState) lookup(id uint64) *objectState {
+func (ds *decodeState) lookup(id objectID) *objectState {
 	return ds.objectsByID[id]
 }
 
@@ -168,11 +160,8 @@ func (ds *decodeState) lookup(id uint64) *objectState {
 // As a special case, we always allow _useable_ references back to the first
 // decoding object because it may have fields that are already decoded. We also
 // allow trivial self reference, since they can be handled internally.
-func (ds *decodeState) wait(waiter *objectState, id uint64, callback func()) {
+func (ds *decodeState) wait(waiter *objectState, id objectID, callback func()) {
 	switch id {
-	case 0:
-		// Nil pointer; nothing to wait for.
-		fallthrough
 	case waiter.id:
 		// Trivial self reference.
 		fallthrough
@@ -192,10 +181,10 @@ func (ds *decodeState) wait(waiter *objectState, id uint64, callback func()) {
 func (ds *decodeState) waitObject(os *objectState, p *pb.Object, callback func()) {
 	if rv, ok := p.Value.(*pb.Object_RefValue); ok {
 		// Refs can encode pointers and maps.
-		ds.wait(os, rv.RefValue, callback)
+		ds.wait(os, objectID(rv.RefValue.Value), callback)
 	} else if sv, ok := p.Value.(*pb.Object_SliceValue); ok {
 		// See decodeObject; we need to wait for the array (if non-nil).
-		ds.wait(os, sv.SliceValue.RefValue, callback)
+		ds.wait(os, objectID(sv.SliceValue.RefValue.Value), callback)
 	} else if iv, ok := p.Value.(*pb.Object_InterfaceValue); ok {
 		// It's an interface (wait recurisvely).
 		ds.waitObject(os, iv.InterfaceValue.Value, callback)
@@ -205,11 +194,40 @@ func (ds *decodeState) waitObject(os *objectState, p *pb.Object, callback func()
 	}
 }
 
+// walkChild returns a child object from obj, given an accessor path. This is
+// the decode-side equivalent to traverse in encode.go.
+//
+// For the purposes of this function, a child object is either a field within a
+// struct or an array element, with one such indirection per element in
+// path. The returned value may be an unexported field, so it may not be
+// directly assignable. See unsafePointerTo.
+func walkChild(path []*pb.Dot, obj reflect.Value) reflect.Value {
+	cursor := obj
+	for _, component := range path {
+		switch pc := component.Value.(type) {
+		case *pb.Dot_Field:
+			if cursor.Kind() != reflect.Struct {
+				panic(fmt.Errorf("next component in child path is a field name, but the current object is not a struct. Path: %v, current obj: %#v", path, cursor))
+			}
+			cursor = cursor.FieldByName(pc.Field)
+		case *pb.Dot_Index:
+			if cursor.Kind() != reflect.Array {
+				panic(fmt.Errorf("next component in child path is an array index, but the current object is not an array. Path: %v, current obj: %#v", path, cursor))
+			}
+			cursor = cursor.Index(int(pc.Index))
+		default:
+			panic("unreachable: switch should be exhaustive")
+		}
+	}
+
+	return cursor
+}
+
 // register registers a decode with a type.
 //
 // This type is only used to instantiate a new object if it has not been
 // registered previously.
-func (ds *decodeState) register(id uint64, typ reflect.Type) *objectState {
+func (ds *decodeState) register(id objectID, typ reflect.Type) *objectState {
 	os, ok := ds.objectsByID[id]
 	if ok {
 		return os
@@ -217,16 +235,27 @@ func (ds *decodeState) register(id uint64, typ reflect.Type) *objectState {
 
 	// Record in the object index.
 	if typ.Kind() == reflect.Map {
-		os = &objectState{id: id, obj: reflect.MakeMap(typ), path: ds.recoverable.copy()}
+		os = &objectState{
+			id:  id,
+			obj: reflect.MakeMap(typ),
+		}
 	} else {
-		os = &objectState{id: id, obj: reflect.New(typ).Elem(), path: ds.recoverable.copy()}
+		os = &objectState{
+			id:  id,
+			obj: reflect.New(typ).Elem(),
+		}
+	}
+	if id == 0 {
+		// Zero-sized objects are always created and never registered.
+		// They cannot be deferred or waited on.
+		return os
 	}
 	ds.objectsByID[id] = os
 
 	if o, ok := ds.deferred[id]; ok {
 		// There is a deferred object.
 		delete(ds.deferred, id) // Free memory.
-		ds.decodeObject(os, os.obj, o, "", nil)
+		ds.decodeObject(os, os.obj, o)
 	} else {
 		// There is no deferred object.
 		ds.outstanding++
@@ -259,16 +288,16 @@ func (ds *decodeState) decodeStruct(os *objectState, obj reflect.Value, s *pb.St
 	}
 
 	// Invoke the load; this will recursively decode other objects.
-	fns, ok := registeredTypes.lookupFns(obj.Addr().Type())
+	fns, ok := obj.Addr().Interface().(SaveLoader)
 	if ok {
 		// Invoke the loader.
-		fns.invokeLoad(obj.Addr(), m)
+		fns.StateLoad(m)
 	} else if obj.NumField() == 0 {
 		// Allow anonymous empty structs.
 		return
 	} else {
 		// Propagate an error.
-		panic(fmt.Errorf("unregistered type %s", obj.Type()))
+		panic(fmt.Errorf("unregistered type %T", obj.Interface()))
 	}
 }
 
@@ -281,8 +310,8 @@ func (ds *decodeState) decodeMap(os *objectState, obj reflect.Value, m *pb.Map) 
 		// Decode the objects.
 		kv := reflect.New(obj.Type().Key()).Elem()
 		vv := reflect.New(obj.Type().Elem()).Elem()
-		ds.decodeObject(os, kv, m.Keys[i], ".(key %d)", i)
-		ds.decodeObject(os, vv, m.Values[i], "[%#v]", kv.Interface())
+		ds.decodeObject(os, kv, m.Keys[i])
+		ds.decodeObject(os, vv, m.Values[i])
 		ds.waitObject(os, m.Keys[i], nil)
 		ds.waitObject(os, m.Values[i], nil)
 
@@ -298,7 +327,7 @@ func (ds *decodeState) decodeArray(os *objectState, obj reflect.Value, a *pb.Arr
 	}
 	// Decode the contents into the array.
 	for i := 0; i < len(a.Contents); i++ {
-		ds.decodeObject(os, obj.Index(i), a.Contents[i], "[%d]", i)
+		ds.decodeObject(os, obj.Index(i), a.Contents[i])
 		ds.waitObject(os, a.Contents[i], nil)
 	}
 }
@@ -327,14 +356,13 @@ func (ds *decodeState) decodeInterface(os *objectState, obj reflect.Value, i *pb
 
 	// Decode the dereferenced element; there is no need to wait here, as
 	// the interface object shares the current object state.
-	ds.decodeObject(os, obj, i.Value, ".(%s)", i.Type)
+	ds.decodeObject(os, obj, i.Value)
 }
 
 // decodeObject decodes a object value.
-func (ds *decodeState) decodeObject(os *objectState, obj reflect.Value, object *pb.Object, format string, param interface{}) {
-	ds.push(false, format, param)
-	ds.stats.Add(obj)
+func (ds *decodeState) decodeObject(os *objectState, obj reflect.Value, object *pb.Object) {
 	ds.stats.Start(obj)
+	defer ds.stats.Done()
 
 	switch x := object.GetValue().(type) {
 	case *pb.Object_BoolValue:
@@ -357,45 +385,47 @@ func (ds *decodeState) decodeObject(os *objectState, obj reflect.Value, object *
 			panic(fmt.Errorf("float truncated in %v for %s", object, obj.Type()))
 		}
 	case *pb.Object_RefValue:
-		// Resolve the pointer itself, even though the object may not
-		// be decoded yet. You need to use wait() in order to ensure
-		// that is the case. See wait above, and Map.Barrier.
-		if id := x.RefValue; id != 0 {
-			// Decoding the interface should have imparted type
-			// information, so from this point it's safe to resolve
-			// and use this dynamic information for actually
-			// creating the object in register.
-			//
-			// (For non-interfaces this is a no-op).
-			dyntyp := reflect.TypeOf(obj.Interface())
-			if dyntyp.Kind() == reflect.Map {
-				// Remove the map object count here to avoid
-				// double counting, as this object will be
-				// counted again when it gets processed later.
-				// We do not add a reference count as the
-				// reference is artificial.
-				ds.stats.Remove(obj)
-				obj.Set(ds.register(id, dyntyp).obj)
-			} else if dyntyp.Kind() == reflect.Ptr {
-				ds.push(true /* dereference */, "", nil)
-				obj.Set(ds.register(id, dyntyp.Elem()).obj.Addr())
-				ds.pop()
-			} else {
-				obj.Set(ds.register(id, dyntyp.Elem()).obj.Addr())
-			}
-		} else {
-			// We leave obj alone here. That's because if obj
-			// represents an interface, it may have been embued
-			// with type information in decodeInterface, and we
-			// don't want to destroy that information.
+		// Resolve the pointer itself, even though the object may not be decoded
+		// yet. You need to use wait() in order to ensure that is the case. See
+		// wait above.
+		id := objectID(x.RefValue.Value)
+
+		// Decoding the interface should have imparted type information, so from
+		// this point it's safe to resolve and use this dynamic information for
+		// actually creating the object in register.
+		//
+		// (For non-interfaces this is a no-op).
+		dyntyp := reflect.TypeOf(obj.Interface())
+		if dyntyp.Kind() == reflect.Map {
+			obj.Set(ds.register(id, dyntyp).obj)
+			break
 		}
+
+		var root *objectState
+		if dyntyp.Elem().Kind() == reflect.Map {
+			root = ds.register(id, dyntyp)
+		} else {
+			root = ds.register(id, dyntyp.Elem())
+		}
+
+		// A RefValue may either refer to an object directly, or a child element
+		// of the object (with potential intermediate types). When referring to
+		// a child element, RefValue.Dot is non-empty. For both cases, simply
+		// call traverseChild to obtain a reference to the appropriate object.
+		if dyntyp.Elem().Kind() == reflect.Map {
+			obj.Set(walkChild(x.RefValue.Dot, root.obj))
+		} else {
+			obj.Set(unsafePointerTo(walkChild(x.RefValue.Dot, root.obj)))
+		}
+	case *pb.Object_NilValue:
+		// We leave obj alone here. That's because if obj represents an
+		// interface, it may have been imbued with type information in
+		// decodeInterface, and we don't want to destroy that information.
 	case *pb.Object_SliceValue:
 		// It's okay to slice the array here, since the contents will
-		// still be provided later on. These semantics are a bit
-		// strange but they are handled in the Map.Barrier properly.
-		//
-		// The special semantics of zero ref apply here too.
-		if id := x.SliceValue.RefValue; id != 0 && x.SliceValue.Capacity > 0 {
+		// still be provided later on.
+		if x.SliceValue.Capacity > 0 {
+			id := objectID(x.SliceValue.RefValue.Value)
 			v := reflect.ArrayOf(int(x.SliceValue.Capacity), obj.Type().Elem())
 			obj.Set(ds.register(id, v).obj.Slice3(0, int(x.SliceValue.Length), int(x.SliceValue.Capacity)))
 		}
@@ -404,6 +434,9 @@ func (ds *decodeState) decodeObject(os *objectState, obj reflect.Value, object *
 	case *pb.Object_StructValue:
 		ds.decodeStruct(os, obj, x.StructValue)
 	case *pb.Object_MapValue:
+		if obj.Kind() == reflect.Ptr {
+			obj = obj.Elem()
+		}
 		ds.decodeMap(os, obj, x.MapValue)
 	case *pb.Object_InterfaceValue:
 		ds.decodeInterface(os, obj, x.InterfaceValue)
@@ -451,11 +484,8 @@ func (ds *decodeState) decodeObject(os *objectState, obj reflect.Value, object *
 		copyArray(obj, reflect.ValueOf(x.Float32ArrayValue.Values))
 	default:
 		// Shoud not happen, not propagated as an error.
-		panic(fmt.Sprintf("unknown object %v for %s", object, obj.Type()))
+		panic(fmt.Errorf("unknown object %v for %s", object, obj.Type()))
 	}
-
-	ds.stats.Done()
-	ds.pop()
 }
 
 func copyArray(dest reflect.Value, src reflect.Value) {
@@ -469,26 +499,23 @@ func copyArray(dest reflect.Value, src reflect.Value) {
 //
 // This function may panic and should be run in safely().
 func (ds *decodeState) Deserialize(obj reflect.Value) {
-	ds.objectsByID[1] = &objectState{id: 1, obj: obj, path: ds.recoverable.copy()}
+	ds.objectsByID[1] = &objectState{
+		id:  1,
+		obj: obj,
+	}
 	ds.outstanding = 1 // The root object.
 
 	// Decode all objects in the stream.
-	//
-	// See above, we never process objects while we have no outstanding
-	// interests (other than the very first object).
-	for id := uint64(1); ds.outstanding > 0; id++ {
-		os := ds.lookup(id)
-		ds.stats.Start(os.obj)
-
+	for id := objectID(1); ds.outstanding > 0; id++ {
 		o, err := ds.readObject()
 		if err != nil {
-			panic(err)
+			panic(fmt.Errorf("invalid header with %d outstanding: %v", ds.outstanding, err))
 		}
 
+		os := ds.lookup(id)
 		if os != nil {
 			// Decode the object.
-			ds.from = &os.path
-			ds.decodeObject(os, os.obj, o, "", nil)
+			ds.decodeObject(os, os.obj, o)
 			ds.outstanding--
 		} else {
 			// If an object hasn't had interest registered
@@ -496,8 +523,6 @@ func (ds *decodeState) Deserialize(obj reflect.Value) {
 			// registered.
 			ds.deferred[id] = o
 		}
-
-		ds.stats.Done()
 	}
 
 	// Check the zero-length header at the end.
@@ -506,7 +531,7 @@ func (ds *decodeState) Deserialize(obj reflect.Value) {
 		panic(err)
 	}
 	if length != 0 {
-		panic(fmt.Sprintf("expected zero-length terminal, got %d", length))
+		panic(fmt.Errorf("expected zero-length terminal, got %d", length))
 	}
 	if object {
 		panic("expected non-object terminal")
@@ -515,7 +540,7 @@ func (ds *decodeState) Deserialize(obj reflect.Value) {
 	// Check if we have any deferred objects.
 	if count := len(ds.deferred); count > 0 {
 		// Shoud not happen, not propagated as an error.
-		panic(fmt.Sprintf("still have %d deferred objects", count))
+		panic(fmt.Errorf("still have %d deferred objects", count))
 	}
 
 	// Scan and fire all callbacks.
@@ -534,7 +559,7 @@ func (ds *decodeState) Deserialize(obj reflect.Value) {
 				if i > 0 {
 					buf.WriteString(" => ")
 				}
-				buf.WriteString(fmt.Sprintf("%s", cycleOS.obj.Type()))
+				fmt.Fprintf(&buf, "%s", cycleOS.obj.Type())
 			}
 			buf.WriteString("}")
 			// Panic as an error; propagate to the caller.

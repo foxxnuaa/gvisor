@@ -4,6 +4,18 @@ load("//tools/go_generics:defs.bzl", "go_template_instance")
 package(licenses = ["notice"])
 
 go_template_instance(
+    name = "object_ref_list",
+    out = "object_ref_list.go",
+    package = "state",
+    prefix = "objectRef",
+    template = "//pkg/ilist:generic_list",
+    types = {
+        "Element": "*objectRef",
+        "Linker": "*objectRef",
+    },
+)
+
+go_template_instance(
     name = "addr_range",
     out = "addr_range.go",
     package = "state",
@@ -29,7 +41,7 @@ go_template_instance(
     types = {
         "Key": "uintptr",
         "Range": "addrRange",
-        "Value": "reflect.Value",
+        "Value": "*objectRef",
         "Functions": "addrSetFunctions",
     },
 )
@@ -40,9 +52,11 @@ go_library(
         "addr_range.go",
         "addr_set.go",
         "decode.go",
+        "decode_unsafe.go",
         "encode.go",
         "encode_unsafe.go",
         "map.go",
+        "object_ref_list.go",
         "printer.go",
         "state.go",
         "stats.go",
@@ -52,6 +66,7 @@ go_library(
     visibility = ["//:sandbox"],
     deps = [
         ":object_go_proto",
+        "//pkg/log",
         "@com_github_golang_protobuf//proto:go_default_library",
     ],
 )

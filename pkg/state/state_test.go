@@ -17,6 +17,7 @@ package state
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io/ioutil"
 	"math"
 	"reflect"
@@ -39,48 +40,51 @@ type TestCase struct {
 // runTest runs all testcases.
 func runTest(t *testing.T, tests []TestCase) {
 	for _, test := range tests {
-		t.Logf("TEST %s:", test.Name)
 		for i, root := range test.Objects {
-			t.Logf("  case#%d: %#v", i, root)
+			t.Run(fmt.Sprintf("%s.%d", test.Name, i), func(t *testing.T) {
 
-			// Save the passed object.
-			saveBuffer := &bytes.Buffer{}
-			saveObjectPtr := reflect.New(reflect.TypeOf(root))
-			saveObjectPtr.Elem().Set(reflect.ValueOf(root))
-			if err := Save(context.Background(), saveBuffer, saveObjectPtr.Interface(), nil); err != nil && !test.Fail {
-				t.Errorf("    FAIL: Save failed unexpectedly: %v", err)
-				continue
-			} else if err != nil {
-				t.Logf("    PASS: Save failed as expected: %v", err)
-				continue
-			}
+				// Save the passed object.
+				saveBuffer := &bytes.Buffer{}
+				saveObjectPtr := reflect.New(reflect.TypeOf(root))
+				saveObjectPtr.Elem().Set(reflect.ValueOf(root))
+				if err := Save(context.Background(), saveBuffer, saveObjectPtr.Interface(), nil); err != nil {
+					if test.Fail {
+						// Save failed, but this case was expected to fail.
+						return
+					}
+					t.Fatalf("Save failed unexpectedly: %v", err)
+				}
 
-			// Load a new copy of the object.
-			loadObjectPtr := reflect.New(reflect.TypeOf(root))
-			if err := Load(context.Background(), bytes.NewReader(saveBuffer.Bytes()), loadObjectPtr.Interface(), nil); err != nil && !test.Fail {
-				t.Errorf("    FAIL: Load failed unexpectedly: %v", err)
-				continue
-			} else if err != nil {
-				t.Logf("    PASS: Load failed as expected: %v", err)
-				continue
-			}
+				// Dump the serialized proto to aid with debugging.
+				var ppBuf bytes.Buffer
+				PrettyPrint(&ppBuf, bytes.NewReader(saveBuffer.Bytes()), false)
+				t.Logf("Encoded state:\n%s", ppBuf.String())
 
-			// Compare the values.
-			loadedValue := loadObjectPtr.Elem().Interface()
-			if eq := reflect.DeepEqual(root, loadedValue); !eq && !test.Fail {
-				t.Errorf("    FAIL: Objects differs; got %#v", loadedValue)
-				continue
-			} else if !eq {
-				t.Logf("    PASS: Object different as expected.")
-				continue
-			}
+				// Load a new copy of the object.
+				loadObjectPtr := reflect.New(reflect.TypeOf(root))
+				if err := Load(context.Background(), bytes.NewReader(saveBuffer.Bytes()), loadObjectPtr.Interface(), nil); err != nil {
+					if test.Fail {
+						// Load failed, but this case was expected to fail.
+						return
+					}
+					t.Fatalf("Load failed unexpectedly: %v", err)
+				}
 
-			// Everything went okay. Is that good?
-			if test.Fail {
-				t.Errorf("    FAIL: Unexpected success.")
-			} else {
-				t.Logf("    PASS: Success.")
-			}
+				// Compare the values.
+				loadedValue := loadObjectPtr.Elem().Interface()
+				if eq := reflect.DeepEqual(root, loadedValue); !eq {
+					if test.Fail {
+						// Objects are different, but we expect this case to fail.
+						return
+					}
+					t.Fatalf("Objects differs; got %#v", loadedValue)
+				}
+
+				// Everything went okay. Is that good?
+				if test.Fail {
+					t.Fatalf("This test was expected to fail, but didn't.")
+				}
+			})
 		}
 	}
 }
@@ -99,12 +103,12 @@ type smartStruct struct {
 	B int
 }
 
-func (s *smartStruct) save(m Map) {
+func (s *smartStruct) StateSave(m Map) {
 	m.Save("A", &s.A)
 	m.Save("B", &s.B)
 }
 
-func (s *smartStruct) load(m Map) {
+func (s *smartStruct) StateLoad(m Map) {
 	m.Load("A", &s.A)
 	m.Load("B", &s.B)
 }
@@ -114,11 +118,11 @@ type valueLoadStruct struct {
 	v int
 }
 
-func (v *valueLoadStruct) save(m Map) {
+func (v *valueLoadStruct) StateSave(m Map) {
 	m.SaveValue("v", v.v)
 }
 
-func (v *valueLoadStruct) load(m Map) {
+func (v *valueLoadStruct) StateLoad(m Map) {
 	m.LoadValue("v", new(int), func(value interface{}) {
 		v.v = value.(int)
 	})
@@ -129,10 +133,10 @@ type afterLoadStruct struct {
 	v int
 }
 
-func (a *afterLoadStruct) save(m Map) {
+func (a *afterLoadStruct) StateSave(m Map) {
 }
 
-func (a *afterLoadStruct) load(m Map) {
+func (a *afterLoadStruct) StateLoad(m Map) {
 	m.AfterLoad(func() {
 		a.v++
 	})
@@ -143,11 +147,11 @@ type genericContainer struct {
 	v interface{}
 }
 
-func (g *genericContainer) save(m Map) {
+func (g *genericContainer) StateSave(m Map) {
 	m.Save("v", &g.v)
 }
 
-func (g *genericContainer) load(m Map) {
+func (g *genericContainer) StateLoad(m Map) {
 	m.Load("v", &g.v)
 }
 
@@ -156,11 +160,11 @@ type sliceContainer struct {
 	v []interface{}
 }
 
-func (s *sliceContainer) save(m Map) {
+func (s *sliceContainer) StateSave(m Map) {
 	m.Save("v", &s.v)
 }
 
-func (s *sliceContainer) load(m Map) {
+func (s *sliceContainer) StateLoad(m Map) {
 	m.Load("v", &s.v)
 }
 
@@ -169,11 +173,25 @@ type mapContainer struct {
 	v map[int]interface{}
 }
 
-func (mc *mapContainer) save(m Map) {
+func (mc *mapContainer) StateSave(m Map) {
 	m.Save("v", &mc.v)
 }
 
-func (mc *mapContainer) load(m Map) {
+func (mc *mapContainer) StateLoad(m Map) {
+	// Some of the test cases below assume legacy behavior wherein maps
+	// will automatically inherit dependencies.
+	m.LoadWait("v", &mc.v)
+}
+
+type mapPtrContainer struct {
+	v *map[int]interface{}
+}
+
+func (mc *mapPtrContainer) StateSave(m Map) {
+	m.Save("v", &mc.v)
+}
+
+func (mc *mapPtrContainer) StateLoad(m Map) {
 	// Some of the test cases below assume legacy behavior wherein maps
 	// will automatically inherit dependencies.
 	m.LoadWait("v", &mc.v)
@@ -195,7 +213,7 @@ type pointerStruct struct {
 	BB **int
 }
 
-func (p *pointerStruct) save(m Map) {
+func (p *pointerStruct) StateSave(m Map) {
 	m.Save("A", &p.A)
 	m.Save("B", &p.B)
 	m.Save("C", &p.C)
@@ -204,7 +222,7 @@ func (p *pointerStruct) save(m Map) {
 	m.Save("BB", &p.BB)
 }
 
-func (p *pointerStruct) load(m Map) {
+func (p *pointerStruct) StateLoad(m Map) {
 	m.Load("A", &p.A)
 	m.Load("B", &p.B)
 	m.Load("C", &p.C)
@@ -227,11 +245,11 @@ func (t *testImpl) Foo() {
 }
 
 // testImpl is trivially serializable.
-func (t *testImpl) save(m Map) {
+func (t *testImpl) StateSave(m Map) {
 }
 
 // testImpl is trivially serializable.
-func (t *testImpl) load(m Map) {
+func (t *testImpl) StateLoad(m Map) {
 }
 
 // testI demonstrates interface dispatching.
@@ -239,11 +257,11 @@ type testI struct {
 	I testInterface
 }
 
-func (t *testI) save(m Map) {
+func (t *testI) StateSave(m Map) {
 	m.Save("I", &t.I)
 }
 
-func (t *testI) load(m Map) {
+func (t *testI) StateLoad(m Map) {
 	m.Load("I", &t.I)
 }
 
@@ -252,11 +270,11 @@ type cycleStruct struct {
 	c *cycleStruct
 }
 
-func (c *cycleStruct) save(m Map) {
+func (c *cycleStruct) StateSave(m Map) {
 	m.Save("c", &c.c)
 }
 
-func (c *cycleStruct) load(m Map) {
+func (c *cycleStruct) StateLoad(m Map) {
 	m.Load("c", &c.c)
 }
 
@@ -267,11 +285,11 @@ type badCycleStruct struct {
 	b *badCycleStruct
 }
 
-func (b *badCycleStruct) save(m Map) {
+func (b *badCycleStruct) StateSave(m Map) {
 	m.Save("b", &b.b)
 }
 
-func (b *badCycleStruct) load(m Map) {
+func (b *badCycleStruct) StateLoad(m Map) {
 	m.LoadWait("b", &b.b)
 	m.AfterLoad(func() {
 		// This is not executable, since AfterLoad requires that the
@@ -285,11 +303,11 @@ type emptyStructPointer struct {
 	nothing *struct{}
 }
 
-func (e *emptyStructPointer) save(m Map) {
+func (e *emptyStructPointer) StateSave(m Map) {
 	m.Save("nothing", &e.nothing)
 }
 
-func (e *emptyStructPointer) load(m Map) {
+func (e *emptyStructPointer) StateLoad(m Map) {
 	m.Load("nothing", &e.nothing)
 }
 
@@ -299,12 +317,12 @@ type truncateInteger struct {
 	v2 int32
 }
 
-func (t *truncateInteger) save(m Map) {
+func (t *truncateInteger) StateSave(m Map) {
 	t.v2 = int32(t.v)
 	m.Save("v", &t.v)
 }
 
-func (t *truncateInteger) load(m Map) {
+func (t *truncateInteger) StateLoad(m Map) {
 	m.Load("v", &t.v2)
 	t.v = int64(t.v2)
 }
@@ -315,12 +333,12 @@ type truncateUnsignedInteger struct {
 	v2 uint32
 }
 
-func (t *truncateUnsignedInteger) save(m Map) {
+func (t *truncateUnsignedInteger) StateSave(m Map) {
 	t.v2 = uint32(t.v)
 	m.Save("v", &t.v)
 }
 
-func (t *truncateUnsignedInteger) load(m Map) {
+func (t *truncateUnsignedInteger) StateLoad(m Map) {
 	m.Load("v", &t.v2)
 	t.v = uint64(t.v2)
 }
@@ -331,14 +349,83 @@ type truncateFloat struct {
 	v2 float32
 }
 
-func (t *truncateFloat) save(m Map) {
+func (t *truncateFloat) StateSave(m Map) {
 	t.v2 = float32(t.v)
 	m.Save("v", &t.v)
 }
 
-func (t *truncateFloat) load(m Map) {
+func (t *truncateFloat) StateLoad(m Map) {
 	m.Load("v", &t.v2)
 	t.v = float64(t.v2)
+}
+
+type outer struct {
+	a  int64
+	cn *container
+}
+
+func (o *outer) StateSave(m Map) {
+	m.Save("a", &o.a)
+	m.Save("cn", &o.cn)
+}
+
+func (o *outer) StateLoad(m Map) {
+	m.Load("a", &o.a)
+	m.LoadValue("cn", new(*container), func(x interface{}) {
+		o.cn = x.(*container)
+	})
+}
+
+type container struct {
+	n    uint64
+	elem *inner
+}
+
+func (c *container) init(o *outer, i *inner) {
+	c.elem = i
+	o.cn = c
+}
+
+func (c *container) StateSave(m Map) {
+	m.Save("n", &c.n)
+	m.Save("elem", &c.elem)
+}
+
+func (c *container) StateLoad(m Map) {
+	m.Load("n", &c.n)
+	m.Load("elem", &c.elem)
+}
+
+type inner struct {
+	c    container
+	x, y uint64
+}
+
+func (i *inner) StateSave(m Map) {
+	m.Save("c", &i.c)
+	m.Save("x", &i.x)
+	m.Save("y", &i.y)
+}
+
+func (i *inner) StateLoad(m Map) {
+	m.Load("c", &i.c)
+	m.Load("x", &i.x)
+	m.Load("y", &i.y)
+}
+
+type system struct {
+	o *outer
+	i *inner
+}
+
+func (s *system) StateSave(m Map) {
+	m.Save("o", &s.o)
+	m.Save("i", &s.i)
+}
+
+func (s *system) StateLoad(m Map) {
+	m.Load("o", &s.o)
+	m.Load("i", &s.i)
 }
 
 func TestTypes(t *testing.T) {
@@ -383,7 +470,27 @@ func TestTypes(t *testing.T) {
 	es := emptyStructPointer{new(struct{})}
 	es1 := []emptyStructPointer{es, es}
 
+	o := outer{
+		a: 10,
+	}
+	i := inner{
+		x: 20,
+		y: 30,
+	}
+	i.c.init(&o, &i)
+
+	s := system{
+		o: &o,
+		i: &i,
+	}
+
 	tests := []TestCase{
+		{
+			Name: "interlocking field pointer",
+			Objects: []interface{}{
+				s,
+			},
+		},
 		{
 			Name: "bool",
 			Objects: []interface{}{
@@ -450,20 +557,20 @@ func TestTypes(t *testing.T) {
 		{
 			Name: "arrays",
 			Objects: []interface{}{
-				&[1048576]bool{false, true, false, true},
-				&[1048576]uint8{0, 1, 2, 3},
-				&[1048576]byte{0, 1, 2, 3},
-				&[1048576]uint16{0, 1, 2, 3},
-				&[1048576]uint{0, 1, 2, 3},
-				&[1048576]uint32{0, 1, 2, 3},
-				&[1048576]uint64{0, 1, 2, 3},
-				&[1048576]uintptr{0, 1, 2, 3},
-				&[1048576]int8{0, -1, -2, -3},
-				&[1048576]int16{0, -1, -2, -3},
-				&[1048576]int32{0, -1, -2, -3},
-				&[1048576]int64{0, -1, -2, -3},
-				&[1048576]float32{0, 1.1, 2.2, 3.3},
-				&[1048576]float64{0, 1.1, 2.2, 3.3},
+				&[5]bool{false, true, false, true},
+				&[5]uint8{0, 1, 2, 3},
+				&[5]byte{0, 1, 2, 3},
+				&[5]uint16{0, 1, 2, 3},
+				&[5]uint{0, 1, 2, 3},
+				&[5]uint32{0, 1, 2, 3},
+				&[5]uint64{0, 1, 2, 3},
+				&[5]uintptr{0, 1, 2, 3},
+				&[5]int8{0, -1, -2, -3},
+				&[5]int16{0, -1, -2, -3},
+				&[5]int32{0, -1, -2, -3},
+				&[5]int64{0, -1, -2, -3},
+				&[5]float32{0, 1.1, 2.2, 3.3},
+				&[5]float64{0, 1.1, 2.2, 3.3},
 			},
 		},
 		{
@@ -515,6 +622,13 @@ func TestTypes(t *testing.T) {
 			},
 		},
 		{
+			Name: "map ptr",
+			Objects: []interface{}{
+				&mapPtrContainer{v: &map[int]interface{}{0: &smartStruct{A: 1}}},
+			},
+			Fail: true,
+		},
+		{
 			Name: "interfaces",
 			Objects: []interface{}{
 				&testI{&testImpl{}},
@@ -558,7 +672,6 @@ func TestTypes(t *testing.T) {
 				&embed1,
 				&embed2,
 			},
-			Fail: true,
 		},
 		{
 			Name: "empty structs",
@@ -599,11 +712,11 @@ type benchStruct struct {
 	_ [4096]byte
 }
 
-func (b *benchStruct) save(m Map) {
+func (b *benchStruct) StateSave(m Map) {
 	m.Save("b", &b.b)
 }
 
-func (b *benchStruct) load(m Map) {
+func (b *benchStruct) StateLoad(m Map) {
 	m.LoadWait("b", &b.b)
 	m.AfterLoad(b.afterLoad)
 }
@@ -654,68 +767,25 @@ func BenchmarkDecoding(b *testing.B) {
 }
 
 func init() {
-	Register("stateTest.smartStruct", (*smartStruct)(nil), Fns{
-		Save: (*smartStruct).save,
-		Load: (*smartStruct).load,
-	})
-	Register("stateTest.afterLoadStruct", (*afterLoadStruct)(nil), Fns{
-		Save: (*afterLoadStruct).save,
-		Load: (*afterLoadStruct).load,
-	})
-	Register("stateTest.valueLoadStruct", (*valueLoadStruct)(nil), Fns{
-		Save: (*valueLoadStruct).save,
-		Load: (*valueLoadStruct).load,
-	})
-	Register("stateTest.genericContainer", (*genericContainer)(nil), Fns{
-		Save: (*genericContainer).save,
-		Load: (*genericContainer).load,
-	})
-	Register("stateTest.sliceContainer", (*sliceContainer)(nil), Fns{
-		Save: (*sliceContainer).save,
-		Load: (*sliceContainer).load,
-	})
-	Register("stateTest.mapContainer", (*mapContainer)(nil), Fns{
-		Save: (*mapContainer).save,
-		Load: (*mapContainer).load,
-	})
-	Register("stateTest.pointerStruct", (*pointerStruct)(nil), Fns{
-		Save: (*pointerStruct).save,
-		Load: (*pointerStruct).load,
-	})
-	Register("stateTest.testImpl", (*testImpl)(nil), Fns{
-		Save: (*testImpl).save,
-		Load: (*testImpl).load,
-	})
-	Register("stateTest.testI", (*testI)(nil), Fns{
-		Save: (*testI).save,
-		Load: (*testI).load,
-	})
-	Register("stateTest.cycleStruct", (*cycleStruct)(nil), Fns{
-		Save: (*cycleStruct).save,
-		Load: (*cycleStruct).load,
-	})
-	Register("stateTest.badCycleStruct", (*badCycleStruct)(nil), Fns{
-		Save: (*badCycleStruct).save,
-		Load: (*badCycleStruct).load,
-	})
-	Register("stateTest.emptyStructPointer", (*emptyStructPointer)(nil), Fns{
-		Save: (*emptyStructPointer).save,
-		Load: (*emptyStructPointer).load,
-	})
-	Register("stateTest.truncateInteger", (*truncateInteger)(nil), Fns{
-		Save: (*truncateInteger).save,
-		Load: (*truncateInteger).load,
-	})
-	Register("stateTest.truncateUnsignedInteger", (*truncateUnsignedInteger)(nil), Fns{
-		Save: (*truncateUnsignedInteger).save,
-		Load: (*truncateUnsignedInteger).load,
-	})
-	Register("stateTest.truncateFloat", (*truncateFloat)(nil), Fns{
-		Save: (*truncateFloat).save,
-		Load: (*truncateFloat).load,
-	})
-	Register("stateTest.benchStruct", (*benchStruct)(nil), Fns{
-		Save: (*benchStruct).save,
-		Load: (*benchStruct).load,
-	})
+	Register("stateTest.system", (*system)(nil))
+	Register("stateTest.outer", (*outer)(nil))
+	Register("stateTest.container", (*container)(nil))
+	Register("stateTest.inner", (*inner)(nil))
+	Register("stateTest.smartStruct", (*smartStruct)(nil))
+	Register("stateTest.afterLoadStruct", (*afterLoadStruct)(nil))
+	Register("stateTest.valueLoadStruct", (*valueLoadStruct)(nil))
+	Register("stateTest.genericContainer", (*genericContainer)(nil))
+	Register("stateTest.sliceContainer", (*sliceContainer)(nil))
+	Register("stateTest.mapContainer", (*mapContainer)(nil))
+	Register("stateTest.mapPtrContainer", (*mapPtrContainer)(nil))
+	Register("stateTest.pointerStruct", (*pointerStruct)(nil))
+	Register("stateTest.testImpl", (*testImpl)(nil))
+	Register("stateTest.testI", (*testI)(nil))
+	Register("stateTest.cycleStruct", (*cycleStruct)(nil))
+	Register("stateTest.badCycleStruct", (*badCycleStruct)(nil))
+	Register("stateTest.emptyStructPointer", (*emptyStructPointer)(nil))
+	Register("stateTest.truncateInteger", (*truncateInteger)(nil))
+	Register("stateTest.truncateUnsignedInteger", (*truncateUnsignedInteger)(nil))
+	Register("stateTest.truncateFloat", (*truncateFloat)(nil))
+	Register("stateTest.benchStruct", (*benchStruct)(nil))
 }

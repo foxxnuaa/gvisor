@@ -25,10 +25,34 @@ import (
 	pb "gvisor.dev/gvisor/pkg/state/object_go_proto"
 )
 
+func formatRefValue(x *pb.Ref, graph uint64, html bool) (string, bool) {
+	ref := fmt.Sprintf("g%dr%d", graph, x.Value)
+	if len(x.Dot) > 0 {
+		var buf strings.Builder
+		buf.WriteString(ref)
+		for _, component := range x.Dot {
+			switch v := component.Value.(type) {
+			case *pb.Dot_Field:
+				buf.WriteString(".")
+				buf.WriteString(v.Field)
+			case *pb.Dot_Index:
+				buf.WriteString(fmt.Sprintf("[%d]", v.Index))
+			default:
+				panic(fmt.Sprintf("unreachable: switch should be exhaustive, unhandled case %v", reflect.TypeOf(component.Value)))
+			}
+		}
+		ref = buf.String()
+	}
+	if html {
+		ref = fmt.Sprintf("<a href=#%s>%s</a>", ref, ref)
+	}
+	return ref, true
+}
+
 // format formats a single object, for pretty-printing. It also returns whether
 // the value is a non-zero value.
 func format(graph uint64, depth int, object *pb.Object, html bool) (string, bool) {
-	switch x := object.GetValue().(type) {
+	switch x := object.Value.(type) {
 	case *pb.Object_BoolValue:
 		return fmt.Sprintf("%t", x.BoolValue), x.BoolValue != false
 	case *pb.Object_StringValue:
@@ -40,23 +64,13 @@ func format(graph uint64, depth int, object *pb.Object, html bool) (string, bool
 	case *pb.Object_DoubleValue:
 		return fmt.Sprintf("%f", x.DoubleValue), x.DoubleValue != 0.0
 	case *pb.Object_RefValue:
-		if x.RefValue == 0 {
-			return "nil", false
-		}
-		ref := fmt.Sprintf("g%dr%d", graph, x.RefValue)
-		if html {
-			ref = fmt.Sprintf("<a href=#%s>%s</a>", ref, ref)
-		}
-		return ref, true
+		return formatRefValue(x.RefValue, graph, html)
 	case *pb.Object_SliceValue:
-		if x.SliceValue.RefValue == 0 {
-			return "nil", false
+		ref, nonzero := formatRefValue(x.SliceValue.RefValue, graph, html)
+		if !nonzero {
+			return ref, nonzero
 		}
-		ref := fmt.Sprintf("g%dr%d", graph, x.SliceValue.RefValue)
-		if html {
-			ref = fmt.Sprintf("<a href=#%s>%s</a>", ref, ref)
-		}
-		return fmt.Sprintf("%s[:%d:%d]", ref, x.SliceValue.Length, x.SliceValue.Capacity), true
+		return fmt.Sprintf("%s{len:%d,cap:%d}", ref, x.SliceValue.Length, x.SliceValue.Capacity), true
 	case *pb.Object_ArrayValue:
 		if len(x.ArrayValue.Contents) == 0 {
 			return "[]", false
@@ -141,10 +155,11 @@ func format(graph uint64, depth int, object *pb.Object, html bool) (string, bool
 		return printArray(reflect.ValueOf(x.Float64ArrayValue.Values))
 	case *pb.Object_Float32ArrayValue:
 		return printArray(reflect.ValueOf(x.Float32ArrayValue.Values))
+	case *pb.Object_NilValue:
+		return "nil", false
+	default:
+		panic(fmt.Sprintf("unreachable: switch should be exhaustive, unhandled case %v", reflect.TypeOf(object.Value)))
 	}
-
-	// Should not happen, but tolerate.
-	return fmt.Sprintf("(unknown proto type: %T)", object.GetValue()), true
 }
 
 // PrettyPrint reads the state stream from r, and pretty prints to w.
@@ -199,8 +214,8 @@ func PrettyPrint(w io.Writer, r io.Reader, html bool) error {
 			return err
 		}
 
-		id++ // First object must be one.
 		str, _ := format(graph, 0, obj, html)
+		id++
 		tag := fmt.Sprintf("g%dr%d", graph, id)
 		if html {
 			tag = fmt.Sprintf("<a name=%s>%s</a>", tag, tag)
